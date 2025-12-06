@@ -1,10 +1,17 @@
 import * as AST from 'core/dist/ast.js';
+import { Runtime } from './runtime.js';
+import { ToolSandbox } from './security/index.js';
 
 export class WorkflowEngine {
-    constructor(private context: any) { }
+    constructor(private runtime: Runtime) {}
 
     async execute(workflowBlock: AST.Block, input: any): Promise<any> {
         console.log(`[Workflow] Starting ${workflowBlock.identifier}`);
+
+        const ir = this.runtime.getIR();
+        if (!ir) {
+            throw new Error('Runtime IR not initialized');
+        }
 
         // Find 'steps' block
         const stepsBlock = workflowBlock.children.find(c => c.type === 'steps');
@@ -14,95 +21,191 @@ export class WorkflowEngine {
         }
 
         const scope: any = { input };
+        const startTime = Date.now();
 
-        // Sequential execution for now (spec allows topological, but sequential is simpler for start)
-        // Steps are attributes in the steps block (steps { step1 = ... })
-        // Wait, attributes are key=expr.
-        // A22 workflow:
-        // steps {
-        //   embed = tool "embedder" { ... }
-        // }
-        // "embed" is key. Value is a Call Expression... wait.
-        // My parser: `tool "embedder" { ... }` is a nested BLOCK, not an expression.
-        // But `key = value` expects an expression.
-        // The Spec says: `embed = tool "embedder" { ... }`
-        // This parses as Attribute if `tool ...` is an expression.
-        // But `tool "embedder"` is a block definition syntax.
-        // 
-        // My Parser `parseAttribute`: key = Expression.
-        // `parseExpression` supports Literal, List, Map, Reference.
-        // It does NOT support Block definitions as values.
+        try {
+            // Steps are attributes in the steps block (steps { step1 = tool... })
+            for (const attr of stepsBlock.attributes) {
+                const stepName = attr.key;
+                const expr = attr.value;
 
-        // CRITICAL SPEC ISSUE OR PARSER LIMITATION:
-        // If the syntax is `embed = tool "name" { }`, then `tool "name" { }` must be an expression.
-        // OR the syntax is `step "embed" { use = tool.name ... }`.
+                if (expr.kind === 'BlockExpression') {
+                    const blockExpr = expr as AST.BlockExpression;
 
-        // Let's re-read the spec example:
-        // embed = tool "embedder" { text = input.text }
+                    switch (blockExpr.type) {
+                        case 'tool':
+                            scope[stepName] = await this.executeTool(blockExpr, scope, ir);
+                            break;
 
-        // This implies `tool "embedder" { ... }` matches `Expression`.
-        // To support this, I need to update Parser to allow a "Block-like Expression" or constructor.
-        // OR distinct logic: `embed` is a label for the block?
-        // `tool "embedder" "embed" { ... }` ? No.
+                        case 'agent':
+                            scope[stepName] = await this.executeAgent(blockExpr, scope);
+                            break;
 
-        // Current Parser `parseExpression`:
-        // if identifier -> Reference.
+                        case 'capability':
+                            scope[stepName] = await this.executeCapability(blockExpr, scope);
+                            break;
 
-        // If I see `tool`, it's an identifier.
-        // If I see `"embedder"`, it's a string.
-        // If I see `{`, it's map/block.
-
-        // A22 v0.1 Spec implies inline block instantiation.
-        // I should probably simplify my parser or the spec for this "Local First" iteration.
-        // Simplification: treating it as a reference if possible, or support `call` expression.
-
-        // For now, I will assume the parser parses `tool "embedder" { ... }` as a Block if it was top level.
-        // But inside `steps { ... }`?
-        // `steps` is a block.
-        // Inside `steps`, we see `embed = ...`. That's an attribute.
-        // The value `tool "embedder" { ... }` causes syntax error in my current parser because `tool` is identifier, then `"embedder"` is string. `parseExpression` sees identifier `tool`, then tries `parseReference`. It sees `"embedder"` (String) next, which acts as a valid property access? No, reference expects dot + identifier.
-
-        // WORKAROUND:
-        // Modify `steps` to use Blocks instead of Assignments for now?
-        // `step "embed" { use = tool.embedder }`
-
-        // OR Update Parser to handle `Identifier String Block` as an Expression (Constructor).
-        // Let's go with updating Parser to support `ConstructorExpression`.
-        // `tool "name" { ... }` -> Expression.
-
-        // I will stick to what the parser can do or simple fixes.
-        // Parsing `key = type "id" { ... }` as an expression.
-        // I need to update `parseExpression` in `core/src/parser.ts`.
-
-        // Steps are attributes in the steps block (steps { step1 = tool... })
-        for (const attr of stepsBlock.attributes) {
-            const stepName = attr.key;
-            const expr = attr.value;
-
-            if (expr.kind === 'BlockExpression') {
-                // e.g. tool "console" { message = "pong" }
-                if (expr.type === 'tool') {
-                    // Execute tool
-                    const toolName = expr.identifier || "";
-                    const inputs: any = {};
-
-                    // Evaluate inputs from block attributes
-                    for (const inputAttr of expr.body.attributes) {
-                        inputs[inputAttr.key] = this.evaluateExpression(inputAttr.value, scope);
+                        default:
+                            console.warn(`[WorkflowStep] ${stepName}: Unknown step type '${blockExpr.type}'`);
                     }
-
-                    console.log(`[WorkflowStep] ${stepName}: Executing tool '${toolName}' with inputs`, inputs);
-                    // Add result to scope (mock)
-                    scope[stepName] = { result: "success" };
                 }
             }
+
+            console.log(`[Workflow] Completed ${workflowBlock.identifier} in ${Date.now() - startTime}ms`);
+            return scope;
+
+        } catch (error: any) {
+            console.error(`[Workflow] Failed ${workflowBlock.identifier}:`, error.message);
+            throw error;
         }
-        return null;
+    }
+
+    private async executeTool(blockExpr: AST.BlockExpression, scope: any, ir: any): Promise<any> {
+        const toolName = blockExpr.identifier || '';
+
+        // Find tool definition
+        const toolDef = ir.tools.find((t: any) => t.id === toolName);
+        if (!toolDef) {
+            throw new Error(`Tool not found: ${toolName}`);
+        }
+
+        // Evaluate inputs from block attributes
+        const inputs: any = {};
+        for (const inputAttr of blockExpr.body.attributes) {
+            inputs[inputAttr.key] = this.evaluateExpression(inputAttr.value, scope);
+        }
+
+        console.log(`[WorkflowStep] Executing tool '${toolName}' with inputs`, inputs);
+
+        // Apply security sandbox if configured
+        const sandbox = new ToolSandbox(toolDef.security);
+
+        // Check policy enforcement
+        const auditLogger = this.runtime.getAuditLogger();
+
+        try {
+            // Execute tool with sandbox
+            const result = await sandbox.execute(async (input) => {
+                // In a real implementation, this would call the actual tool handler
+                // For now, simulate tool execution
+                if (toolDef.handler) {
+                    return await this.callToolHandler(toolDef.handler, input);
+                }
+                return { success: true, data: input };
+            }, inputs);
+
+            auditLogger.logToolCall(toolName, 'workflow', true);
+            return result;
+
+        } catch (error: any) {
+            auditLogger.logToolCall(toolName, 'workflow', false, error.message);
+            throw error;
+        }
+    }
+
+    private async executeAgent(blockExpr: AST.BlockExpression, scope: any): Promise<any> {
+        const agentId = blockExpr.identifier || '';
+
+        // Evaluate inputs from block attributes
+        const inputs: any = {};
+        for (const inputAttr of blockExpr.body.attributes) {
+            inputs[inputAttr.key] = this.evaluateExpression(inputAttr.value, scope);
+        }
+
+        console.log(`[WorkflowStep] Executing agent '${agentId}' with inputs`, inputs);
+
+        // Build messages from inputs
+        const messages = [];
+        if (inputs.message) {
+            messages.push({ role: 'user', content: inputs.message });
+        } else if (inputs.messages) {
+            messages.push(...inputs.messages);
+        }
+
+        // Execute agent via runtime
+        const response = await this.runtime.executeAgent(agentId, messages, inputs.params);
+
+        return {
+            content: response.content,
+            usage: response.usage
+        };
+    }
+
+    private async executeCapability(blockExpr: AST.BlockExpression, scope: any): Promise<any> {
+        const capabilityId = blockExpr.identifier || '';
+
+        // Evaluate inputs
+        const inputs: any = {};
+        for (const inputAttr of blockExpr.body.attributes) {
+            inputs[inputAttr.key] = this.evaluateExpression(inputAttr.value, scope);
+        }
+
+        console.log(`[WorkflowStep] Executing capability '${capabilityId}' with inputs`, inputs);
+
+        // In a real implementation, this would invoke the capability
+        // For now, just return mock result
+        return { success: true, capability: capabilityId };
+    }
+
+    private async callToolHandler(handler: string, input: any): Promise<any> {
+        // Parse handler string
+        // Format: external("http://...")
+        const match = handler.match(/external\("(.+)"\)/);
+        if (match) {
+            const url = match[1];
+            console.log(`[Tool] Calling external handler: ${url}`);
+
+            try {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(input)
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Tool handler returned ${response.status}`);
+                }
+
+                return await response.json();
+            } catch (error: any) {
+                throw new Error(`Tool handler failed: ${error.message}`);
+            }
+        }
+
+        // Unknown handler format
+        throw new Error(`Unknown tool handler format: ${handler}`);
     }
 
     private evaluateExpression(expr: AST.Expression, scope: any): any {
-        if (expr.kind === 'Literal') return expr.value;
-        // implement refs later
+        if (expr.kind === 'Literal') {
+            return (expr as AST.Literal).value;
+        }
+
+        if (expr.kind === 'Reference') {
+            const ref = expr as AST.Reference;
+            // Resolve reference from scope
+            // e.g., input.text -> scope.input.text
+            let value = scope;
+            for (const part of ref.path) {
+                value = value?.[part];
+            }
+            return value;
+        }
+
+        if (expr.kind === 'List') {
+            const list = expr as AST.ListExpression;
+            return list.elements.map(e => this.evaluateExpression(e, scope));
+        }
+
+        if (expr.kind === 'Map') {
+            const map = expr as AST.MapExpression;
+            const result: any = {};
+            for (const prop of map.properties) {
+                result[prop.key] = this.evaluateExpression(prop.value, scope);
+            }
+            return result;
+        }
+
         return null;
     }
 }
