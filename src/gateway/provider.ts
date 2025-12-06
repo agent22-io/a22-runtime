@@ -71,8 +71,7 @@ export class DefaultCredentialResolver implements CredentialResolver {
     }
 
     async getSecret(secretName: string): Promise<string | undefined> {
-        // In the future, integrate with secrets managers (AWS Secrets Manager, etc.)
-        // For now, fall back to environment variables
+        // Fallback to environment - override for secrets manager integration
         return process.env[secretName];
     }
 }

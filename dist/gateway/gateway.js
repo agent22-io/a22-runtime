@@ -59,7 +59,7 @@ export class ModelGateway {
                         else if (credRef.type === 'secrets') {
                             apiKey = await this.credentialResolver.getSecret(credRef.ref);
                         }
-                        break; // Use first credential for now
+                        break;
                     }
                 }
             }
@@ -130,22 +130,16 @@ export class ModelGateway {
         throw new Error(`All providers failed. Last error: ${lastError?.message}`);
     }
     async costOptimizedStrategy(providers, messages, params) {
-        // Sort by cost (simple heuristic: smaller models are cheaper)
-        // In production, use actual pricing data
         const sorted = [...providers].sort((a, b) => {
-            const aCost = this.estimateCost(a.name);
-            const bCost = this.estimateCost(b.name);
-            return aCost - bCost;
+            return this.estimateCost(a.name) - this.estimateCost(b.name);
         });
         return this.failoverStrategy(sorted, messages, params);
     }
     async latencyOptimizedStrategy(providers, messages, params) {
-        // In production, track latency stats and sort by historical performance
-        // For now, just use failover
+        // TODO: Track latency stats and sort by historical performance
         return this.failoverStrategy(providers, messages, params);
     }
     async roundRobinStrategy(providers, messages, params) {
-        // Simple round-robin: use index based on request count
         const totalRequests = Array.from(this.usageStats.values())
             .reduce((sum, stats) => sum + stats.requests, 0);
         const index = totalRequests % providers.length;
@@ -185,13 +179,10 @@ export class ModelGateway {
         }
     }
     extractProviderId(providerRef) {
-        // Extract ID from reference like "provider.openai"
         const parts = providerRef.split('.');
         return parts[parts.length - 1];
     }
     estimateCost(modelName) {
-        // Simple cost heuristic (lower is cheaper)
-        // In production, use actual pricing data
         const name = modelName.toLowerCase();
         if (name.includes('gpt-4'))
             return 100;
@@ -203,7 +194,7 @@ export class ModelGateway {
             return 50;
         if (name.includes('claude-3-haiku'))
             return 10;
-        return 50; // Default mid-range
+        return 50;
     }
     /**
      * Get usage statistics

@@ -65,13 +65,11 @@ export class WorkflowEngine {
         // Check policy enforcement
         const auditLogger = this.runtime.getAuditLogger();
         try {
-            // Execute tool with sandbox
             const result = await sandbox.execute(async (input) => {
-                // In a real implementation, this would call the actual tool handler
-                // For now, simulate tool execution
                 if (toolDef.handler) {
                     return await this.callToolHandler(toolDef.handler, input);
                 }
+                // No handler - return input as passthrough
                 return { success: true, data: input };
             }, inputs);
             auditLogger.logToolCall(toolName, 'workflow', true);
@@ -113,8 +111,7 @@ export class WorkflowEngine {
             inputs[inputAttr.key] = this.evaluateExpression(inputAttr.value, scope);
         }
         console.log(`[WorkflowStep] Executing capability '${capabilityId}' with inputs`, inputs);
-        // In a real implementation, this would invoke the capability
-        // For now, just return mock result
+        // Capability invocation not yet implemented
         return { success: true, capability: capabilityId };
     }
     async callToolHandler(handler, input) {

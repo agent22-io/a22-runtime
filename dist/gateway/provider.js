@@ -9,8 +9,7 @@ export class DefaultCredentialResolver {
         return process.env[varName];
     }
     async getSecret(secretName) {
-        // In the future, integrate with secrets managers (AWS Secrets Manager, etc.)
-        // For now, fall back to environment variables
+        // Fallback to environment - override for secrets manager integration
         return process.env[secretName];
     }
 }

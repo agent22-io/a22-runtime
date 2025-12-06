@@ -157,14 +157,13 @@ export class Runtime {
                 : agent.policy.id;
             const policy = this.policies.get(policyId);
             if (policy) {
-                // Policy checks would go here
-                // For now, just log
                 this.auditLogger.log({
                     event: 'agent.policy_check',
                     agent: agentId,
                     success: true,
                     metadata: { policy: policyId }
                 });
+                // TODO: Enforce policy checks (tool/capability access, resource limits)
             }
         }
 
