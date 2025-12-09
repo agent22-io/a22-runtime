@@ -1,11 +1,8 @@
-agent "bot" {
-    on event "ping" {
-        call workflow "pong" {}
-    }
-}
+agent "bot"
+	when event "ping"
+		-> .pong
 
-workflow "pong" {
-    steps {
-        log = tool "console" { message = "pong" }
-    }
-}
+workflow "pong"
+	steps
+		log = tool "console"
+			message: "pong"
